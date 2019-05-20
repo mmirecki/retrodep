@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -92,26 +93,45 @@ func getProject(src *retrodep.GoSource, importPath string) *retrodep.RepoPath {
 	return main
 }
 
+// newWorkingTree creates a new retrodep.WorkingTree for the path. If
+// the vcs command itself fails for some reason, a nil
+// retrodep.WorkingTree is returned.
 func newWorkingTree(path string, project *vcs.RepoRoot) (wt retrodep.WorkingTree, err error) {
 	wt, err = retrodep.NewWorkingTree(project)
 	if err != nil {
 		log.Errorf("%s: %s, retrying", path, err)
 		wt, err = retrodep.NewWorkingTree(project)
 	}
+
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			wt = nil
+			err = nil
+		}
+	}
+
 	return
 }
 
 func showTopLevel(tmpl *template.Template, src *retrodep.GoSource) *retrodep.Reference {
+	var topLevelMarker string
+	if *templateArg != "" {
+		topLevelMarker = "*"
+	}
 	main := getProject(src, *importPath)
 	wt, err := newWorkingTree(src.Path, &main.RepoRoot)
 	if err != nil {
 		log.Fatalf("%s: %s", src.Path, err)
 	}
-	defer wt.Close()
-	project, err := src.DescribeProject(main, wt, src.Path, nil)
-	var topLevelMarker string
-	if *templateArg != "" {
-		topLevelMarker = "*"
+	var project *retrodep.Reference
+	if wt != nil {
+		defer wt.Close()
+		project, err = src.DescribeProject(main, wt, src.Path, nil)
+	} else {
+		project = &retrodep.Reference{
+			Pkg:  main.Root,
+			Repo: main.Repo,
+		}
 	}
 	switch err {
 	case retrodep.ErrorVersionNotFound:
@@ -142,11 +162,18 @@ func showVendored(tmpl *template.Template, src *retrodep.GoSource, top *retrodep
 	for _, repo := range repos {
 		project := vendored[repo]
 		wt, err := newWorkingTree(project.Root, &project.RepoRoot)
-		if err != nil {
-			log.Fatalf("%s: %s", project.Root, err)
+		var vp *retrodep.Reference
+		if wt != nil {
+			defer wt.Close()
+			vp, err = src.DescribeVendoredProject(project, wt, top)
+		} else {
+			vp = &retrodep.Reference{
+				TopPkg: top.Pkg,
+				TopVer: top.Ver,
+				Pkg:    project.Root,
+				Repo:   project.Repo,
+			}
 		}
-		defer wt.Close()
-		vp, err := src.DescribeVendoredProject(project, wt, top)
 		switch err {
 		case retrodep.ErrorVersionNotFound:
 			displayUnknown(tmpl, "", vp, project.Root)
